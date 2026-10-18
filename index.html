@@ -80,6 +80,13 @@
 
   .hint { margin: 12px 0 0; color: #767fa6; font-size: 12px; text-align: center; }
 
+  .stage-title {
+    margin: 18px 0 0; padding: 8px 12px;
+    border-radius: 10px; background: rgba(108, 123, 255, .12);
+    border: 1px solid rgba(108, 123, 255, .3);
+    color: #b7c0ff; font-size: 13px; font-weight: 600; text-align: center;
+  }
+
   iframe {
     width: 100%; height: 660px; margin-top: 16px;
     border: 1px solid #242a46; border-radius: 12px;
@@ -122,15 +129,23 @@
     </div>
 
     <ol>
-      <li>点击下方按钮，打开官方支付页</li>
-      <li>登录你的 VTX 账户（未登录会自动显示登录框）</li>
-      <li>支付 <b>5.00 VTX</b>，奖励由服务端直接入账</li>
+      <li><b>第一步</b>：支付 <b>5.00 VTX</b> 给官方账户</li>
+      <li><b>第二步</b>：支付成功后自动打开收款页，<b>领取 1000.00 VTX</b></li>
+      <li>两个窗口都需要登录并输入账户密码确认</li>
     </ol>
 
     <button id="start" class="primary" type="button">参与活动</button>
-    <p class="hint">每个账户限参与一次 · 支付金额与收款方已锁定</p>
+    <p class="hint">每个账户限参与一次 · 金额与对手方已锁定</p>
 
-    <iframe id="pay-frame" hidden referrerpolicy="no-referrer" title="VTX 支付"></iframe>
+    <section id="stage-pay" hidden>
+      <p class="stage-title">第一步 · 支付 5.00 VTX</p>
+      <iframe id="pay-frame" referrerpolicy="no-referrer" title="VTX 支付"></iframe>
+    </section>
+
+    <section id="stage-bonus" hidden>
+      <p class="stage-title">第二步 · 领取 1000.00 VTX</p>
+      <iframe id="bonus-frame" referrerpolicy="no-referrer" title="VTX 收款"></iframe>
+    </section>
 
     <div id="status" class="status" hidden></div>
   </section>
@@ -149,14 +164,21 @@ const CONFIG = {
 };
 
 const startButton = document.getElementById("start");
-const frame = document.getElementById("pay-frame");
+const payStage = document.getElementById("stage-pay");
+const bonusStage = document.getElementById("stage-bonus");
+const payFrame = document.getElementById("pay-frame");
+const bonusFrame = document.getElementById("bonus-frame");
 const statusBox = document.getElementById("status");
 
-function buildPayUrl() {
+// idle → paying（等待付款） → bonus（等待收款） → done
+let stage = "idle";
+
+function buildUrl(kind) {
+  const isPay = kind === "payment";
   const params = new URLSearchParams({
-    type: "payment",
+    type: kind,
     party: CONFIG.campaignAccount,
-    amount: CONFIG.payAmount,
+    amount: isPay ? CONFIG.payAmount : CONFIG.bonusAmount,
     description: CONFIG.description,
     lock: "1",
   });
@@ -191,12 +213,32 @@ function renderStatus(ok, title, rows, raw) {
 }
 
 startButton.addEventListener("click", () => {
+  stage = "paying";
   startButton.disabled = true;
-  startButton.textContent = "请在下方完成支付";
-  frame.hidden = false;
-  frame.src = buildPayUrl();
-  frame.scrollIntoView({ behavior: "smooth", block: "center" });
+  startButton.textContent = "请先完成付款";
+
+  bonusStage.hidden = true;
+  statusBox.hidden = true;
+
+  payStage.hidden = false;
+  payFrame.src = buildUrl("payment");
+  payFrame.scrollIntoView({ behavior: "smooth", block: "center" });
 });
+
+function startBonusStage() {
+  stage = "bonus";
+  payStage.hidden = true;
+  bonusStage.hidden = false;
+  bonusFrame.src = buildUrl("receipt");
+  startButton.textContent = "请领取奖励";
+
+  renderStatus(true, "付款完成，请在下方领取奖励", [
+    ["已支付", CONFIG.payAmount + " VTX"],
+    ["待领取", CONFIG.bonusAmount + " VTX"],
+    ["说明", "在收款页输入密码确认即可到账"],
+  ]);
+  bonusFrame.scrollIntoView({ behavior: "smooth", block: "center" });
+}
 
 window.addEventListener("message", (event) => {
   // 必须校验来源，否则任何页面都能伪造一条"支付成功"
@@ -204,31 +246,47 @@ window.addEventListener("message", (event) => {
 
   const data = event.data;
   if (!data || data.type !== "vtx-pay" || !data.ok) return;
-  if (data.kind !== "payment") return;   // 只认付款，不认收款
 
   const trade = data.trade || {};
   const account = data.account || {};
   const amount = Number(trade.price ?? trade.amount ?? 0);
 
-  // 防篡改：金额必须是活动价，否则不认定参与成功
-  if (Number.isFinite(amount) && amount > 0 && amount !== Number(CONFIG.payAmount)) {
-    renderStatus(false, "金额与活动不符", [
-      ["实付", amount + " VTX"],
-      ["活动价", CONFIG.payAmount + " VTX"],
-    ], data);
-    startButton.disabled = false;
-    startButton.textContent = "重新参与";
+  // 第一步：付款
+  if (stage === "paying" && data.kind === "payment") {
+    // 防篡改：金额必须是活动价，否则不认定参与成功
+    if (Number.isFinite(amount) && amount > 0 && amount !== Number(CONFIG.payAmount)) {
+      stage = "idle";
+      renderStatus(false, "金额与活动不符", [
+        ["实付", amount + " VTX"],
+        ["活动价", CONFIG.payAmount + " VTX"],
+      ], data);
+      startButton.disabled = false;
+      startButton.textContent = "重新参与";
+      return;
+    }
+    startBonusStage();
     return;
   }
 
-  renderStatus(true, "支付成功，奖励已入账", [
-    ["支付", CONFIG.payAmount + " VTX"],
-    ["奖励", CONFIG.bonusAmount + " VTX"],
-    ["当前余额", account.money ? account.money + " VTX" : "请刷新查看"],
-    ["交易号", trade.id || trade.time || "—"],
-  ], data);
-
-  startButton.textContent = "已完成";
+  // 第二步：收款
+  if (stage === "bonus" && data.kind === "receipt") {
+    if (Number.isFinite(amount) && amount > 0 && amount !== Number(CONFIG.bonusAmount)) {
+      renderStatus(false, "领取金额不正确", [
+        ["实领", amount + " VTX"],
+        ["应领", CONFIG.bonusAmount + " VTX"],
+      ], data);
+      return;
+    }
+    stage = "done";
+    bonusStage.hidden = true;
+    startButton.textContent = "已完成";
+    renderStatus(true, "参与成功，奖励已到账", [
+      ["支付", CONFIG.payAmount + " VTX"],
+      ["奖励", CONFIG.bonusAmount + " VTX"],
+      ["当前余额", account.money ? account.money + " VTX" : "请刷新查看"],
+      ["交易号", trade.time || "—"],
+    ], data);
+  }
 });
 </script>
 </body>
